@@ -25,7 +25,7 @@ class LLMClient:
     def __init__(self):
         load_dotenv() # 加载 .env 文件 (仅本地测试时有效)
         self.api_key = os.environ.get('OPENROUTER_API_KEY')
-        self.model = "deepseek/deepseek-v3.2-exp" # 使用您指定的模型
+        self.model = "google/gemini-2.5-flash-preview-09-2025" # 使用您指定的模型
 
     def call_llm(self, prompt_text: str):
         if not self.api_key:
