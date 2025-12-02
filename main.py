@@ -10,8 +10,18 @@ from dotenv import load_dotenv
 from collections import defaultdict
 import time
 
+# ✅ 导入数据库模块
+from database import init_database, save_conversation, get_recent_conversations, get_stats, search_conversations
+
 # --- 初始化应用 ---
 app = FastAPI(title="Central AI Service")
+
+# ✅ 应用启动时初始化数据库
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化数据库"""
+    init_database()
+    print("✅ 数据库已初始化")
 
 # --- 自定义 CORS 中间件（只允许 Shopify 域名）---
 class CustomCORSMiddleware(BaseHTTPMiddleware):
@@ -170,6 +180,7 @@ async def ask_ai_endpoint(request: AIRequest, req: Request):
     AI 问答端点
     - 每分钟最多 10 次请求
     - 每天最多 100 次请求
+    - ✅ 自动记录所有对话到数据库
     """
     # 获取客户端 IP
     client_ip = get_client_ip(req)
@@ -179,8 +190,23 @@ async def ask_ai_endpoint(request: AIRequest, req: Request):
     if not allowed:
         raise HTTPException(status_code=429, detail=error_msg)
     
+    # 记录开始时间
+    start_time = time.time()
+    
     # 调用 AI
     ai_response = llm_client.call_llm(request.prompt)
+    
+    # 计算响应时间
+    response_time = time.time() - start_time
+    
+    # ✅ 保存到数据库
+    save_conversation(
+        ip=client_ip,
+        prompt=request.prompt,
+        response=ai_response,
+        model=llm_client.model,
+        response_time=response_time
+    )
     
     # 打印使用情况日志
     print(f"[{client_ip}] 分钟: {minute_requests[client_ip]['count']}/{MINUTE_LIMIT} | 每日: {daily_requests[client_ip]['count']}/{DAILY_LIMIT}")
@@ -192,19 +218,53 @@ def health_check():
     """健康检查（用于监控）"""
     return {"status": "healthy"}
 
-# 可选：管理端点（生产环境建议删除或添加认证）
+# ✅ 新增：查看统计信息
 @app.get("/admin/stats")
 def get_usage_stats():
     """查看当前使用统计"""
+    try:
+        db_stats = get_stats()
+    except:
+        db_stats = {"error": "数据库暂无数据"}
+    
     return {
-        "minute_usage": {
-            ip: data["count"] 
-            for ip, data in minute_requests.items() 
-            if data["count"] > 0
-        },
-        "daily_usage": {
-            ip: data["count"] 
-            for ip, data in daily_requests.items() 
-            if data["count"] > 0
+        "database": db_stats,
+        "rate_limits": {
+            "minute_usage": {
+                ip: data["count"] 
+                for ip, data in minute_requests.items() 
+                if data["count"] > 0
+            },
+            "daily_usage": {
+                ip: data["count"] 
+                for ip, data in daily_requests.items() 
+                if data["count"] > 0
+            }
         }
     }
+
+# ✅ 新增：查看最近对话
+@app.get("/admin/conversations")
+def get_conversations(limit: int = 50):
+    """查看最近的对话记录"""
+    try:
+        conversations = get_recent_conversations(limit)
+        return {
+            "total": len(conversations),
+            "conversations": conversations
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+# ✅ 新增：搜索对话
+@app.get("/admin/search")
+def search_conversations_endpoint(keyword: str = None, ip: str = None, limit: int = 50):
+    """搜索对话记录"""
+    try:
+        results = search_conversations(keyword, ip, limit)
+        return {
+            "total": len(results),
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
