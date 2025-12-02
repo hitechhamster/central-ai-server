@@ -22,7 +22,9 @@ class CustomCORSMiddleware(BaseHTTPMiddleware):
         allowed = (
             origin.endswith(".myshopify.com") or 
             origin == "https://admin.shopify.com" or
-            origin.startswith("http://localhost")  # 本地测试
+            origin.startswith("http://localhost") or  # 本地测试
+            origin == "https://theqiflow.com" or      # ✅ 你的自定义域名 1
+            origin == "https://fengshuisource.com"    # ✅ 你的自定义域名 2
         )
         
         # 处理预检请求（OPTIONS）
