@@ -1,9 +1,16 @@
 # database.py
 import sqlite3
+import os
 from datetime import datetime
 from contextlib import contextmanager
 
-DATABASE_NAME = "conversations.db"
+# ✅ 自动检测持久化磁盘路径
+if os.path.exists("/data"):
+    DATABASE_NAME = "/data/conversations.db"
+    print("✅ 使用持久化磁盘: /data/conversations.db")
+else:
+    DATABASE_NAME = "conversations.db"
+    print("⚠️ 使用临时存储: conversations.db")
 
 @contextmanager
 def get_db():
