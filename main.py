@@ -121,7 +121,7 @@ class LLMClient:
     def __init__(self):
         load_dotenv()  # 加载环境变量
         self.api_key = os.environ.get('OPENROUTER_API_KEY')
-        self.model = "deepseek/deepseek-v3.2"
+        self.model = "qwen/qwen3-235b-a22b-2507"
     
     def call_llm(self, prompt_text: str):
         """调用 OpenRouter API"""
