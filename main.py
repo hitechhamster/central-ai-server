@@ -121,7 +121,7 @@ def check_rate_limit(ip: str):
 
 # --- 异步 LLM 客户端 ---
 class AsyncLLMClient:
-    """异步 LLM 客户端，支持多模型"""
+    """异步 LLM 客户端 - Google Gemini 官方 API"""
     
     def __init__(self):
         load_dotenv()
@@ -130,8 +130,8 @@ class AsyncLLMClient:
         
         # ✅ 允许的模型白名单
         self.allowed_models = {
-            "gemini-3-flash-preview",   # 默认快速模型
-            "gemini-3-pro-preview",     # 高级推理模型（用于复杂任务）
+            "gemini-3-flash-preview",        # 快速模型
+            "gemini-3.1-pro-preview",        # 高级推理模型（用于复杂任务）
         }
     
     def get_model(self, requested_model: Optional[str]) -> str:
@@ -141,33 +141,30 @@ class AsyncLLMClient:
         return self.default_model
     
     async def call_llm(self, prompt_text: str, model: Optional[str] = None) -> str:
-        """异步调用 OpenRouter API"""
+        """异步调用 Google Gemini API"""
         if not self.api_key:
-            print("❌ 错误：未找到 OPENROUTER_API_KEY 环境变量")
+            print("❌ 错误：未找到 GOOGLE_GEMINI_API_KEY 环境变量")
             return "服务器配置错误，请联系管理员"
         
         use_model = self.get_model(model)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{use_model}:generateContent?key={self.api_key}"
         
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://theqiflow.com",
-                        "X-Title": "Feng Shui AI Service"
-                    },
+                    url,
+                    headers={"Content-Type": "application/json"},
                     json={
-                        "model": use_model,
-                        "messages": [{"role": "user", "content": prompt_text}],
-                        "temperature": 0.7,
-                        "max_tokens": 8000
+                        "contents": [{"parts": [{"text": prompt_text}]}],
+                        "generationConfig": {
+                            "temperature": 0.7,
+                            "maxOutputTokens": 8000
+                        }
                     }
                 )
                 response.raise_for_status()
                 result = response.json()
-                return result['choices'][0]['message']['content']
+                return result["candidates"][0]["content"]["parts"][0]["text"]
         
         except httpx.TimeoutException:
             print("⏱️ 错误：API 请求超时")
@@ -208,7 +205,7 @@ async def ask_ai_endpoint(request: AIRequest, req: Request):
     
     参数：
     - prompt: 问题内容
-    - model: 可选，指定模型 (如 "google/gemini-2.5-pro-preview")
+    - model: 可选，指定模型 (如 "gemini-3.1-pro-preview")
     """
     # 获取客户端 IP
     client_ip = get_client_ip(req)
