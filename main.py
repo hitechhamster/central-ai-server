@@ -46,6 +46,7 @@ class CustomCORSMiddleware(BaseHTTPMiddleware):
             origin == "https://admin.shopify.com" or
             origin == "https://theqiflow.com" or
             origin == "https://fengshuisource.com" or
+            origin == "https://bazi-master.com" or    
             (not is_production and origin.startswith("http://localhost"))
         )
         
