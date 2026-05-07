@@ -194,7 +194,7 @@ def read_root():
     return {
         "message": "AI Service 运行中",
         "status": "ok",
-        "version": "2.1",
+        "version": "2.2",
         "default_model": llm_client.default_model,
         "available_models": list(llm_client.allowed_models)
     }
@@ -512,6 +512,137 @@ def webhook_test():
                 "GOOGLE_ADS_CONVERSION_ACTION_ID"
             ] if not os.environ.get(var)
         ]
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# ✅ KLAVIYO 服务端代理端点（绕开 /client/events 的 IP 反滥用拦截）
+# ════════════════════════════════════════════════════════════════
+# 背景：
+#   Klaviyo 的 /client/events 是给真实顾客浏览器调用的公开端点，
+#   带有 IP 级别的反滥用模型。管理员从同一台电脑连续推送多个客户的
+#   Bracelet Recommendation Email 事件时会被 Klaviyo 边缘层 403 掉。
+# 
+# 解决方案：
+#   在本服务器（Render 服务端，IP 固定且被识别为合法商家流量）中转，
+#   走 Klaviyo 服务端 API /api/events + Private API Key 鉴权，
+#   不会触发针对 /client/events 的反滥用模型。
+#
+# 前端只需把原来直接调 https://a.klaviyo.com/client/events/ 的请求
+# 改为调 https://central-ai-server.onrender.com/api/push-klaviyo
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/push-klaviyo")
+async def push_klaviyo(request: Request):
+    """
+    Klaviyo 事件推送代理
+    
+    前端 POST body:
+    {
+      "email": "customer@example.com",
+      "first_name": "张三",
+      "metric_name": "Bracelet Recommendation Email",
+      "properties": { ...任意自定义字段... }
+    }
+    """
+    # 1. IP 限流（与 AI 调用共用同一个计数器）
+    client_ip = get_client_ip(request)
+    allowed, error_msg = check_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_msg)
+    
+    # 2. 解析并校验 body
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    email = (body.get("email") or "").strip()
+    first_name = body.get("first_name") or ""
+    metric_name = (body.get("metric_name") or "").strip()
+    properties = body.get("properties") or {}
+    
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid or missing email")
+    if not metric_name:
+        raise HTTPException(status_code=400, detail="Missing metric_name")
+    if not isinstance(properties, dict):
+        raise HTTPException(status_code=400, detail="properties must be an object")
+    
+    # 3. 取 Klaviyo Private Key
+    klaviyo_key = os.environ.get("KLAVIYO_PRIVATE_API_KEY")
+    if not klaviyo_key:
+        print("❌ KLAVIYO_PRIVATE_API_KEY 环境变量未配置")
+        raise HTTPException(status_code=500, detail="Klaviyo not configured on server")
+    
+    # 4. 构造 Klaviyo 服务端 API payload（注意是 /api/events，不是 /client/events）
+    payload = {
+        "data": {
+            "type": "event",
+            "attributes": {
+                "properties": properties,
+                "metric": {
+                    "data": {
+                        "type": "metric",
+                        "attributes": {"name": metric_name}
+                    }
+                },
+                "profile": {
+                    "data": {
+                        "type": "profile",
+                        "attributes": {
+                            "email": email,
+                            "first_name": first_name
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    # 5. 调 Klaviyo 服务端 /api/events
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://a.klaviyo.com/api/events/",
+                headers={
+                    "Authorization": f"Klaviyo-API-Key {klaviyo_key}",
+                    "revision": "2024-10-15",
+                    "Content-Type": "application/json",
+                    "accept": "application/vnd.api+json"
+                },
+                json=payload
+            )
+        
+        if resp.status_code in (200, 201, 202):
+            print(f"[{client_ip}] ✅ Klaviyo 推送成功 → {email} (metric: {metric_name})")
+            return {"success": True, "klaviyo_status": resp.status_code}
+        
+        # Klaviyo 返回错误，把详情透传给前端便于排查
+        err_text = resp.text[:1000]
+        print(f"[{client_ip}] ❌ Klaviyo {resp.status_code}: {err_text}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Klaviyo {resp.status_code}: {err_text}"
+        )
+    
+    except httpx.TimeoutException:
+        print(f"[{client_ip}] ⏱️ Klaviyo API 超时")
+        raise HTTPException(status_code=504, detail="Klaviyo API timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[{client_ip}] ❌ Klaviyo 调用异常: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/klaviyo-test")
+def klaviyo_test():
+    """检查 Klaviyo 配置是否就绪"""
+    return {
+        "klaviyo_configured": bool(os.environ.get("KLAVIYO_PRIVATE_API_KEY")),
+        "endpoint": "/api/push-klaviyo",
+        "note": "POST email/first_name/metric_name/properties as JSON"
     }
 
 
