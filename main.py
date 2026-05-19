@@ -127,10 +127,11 @@ class AsyncLLMClient:
     def __init__(self):
         load_dotenv()
         self.api_key = os.environ.get('GOOGLE_GEMINI_API_KEY')
-        self.default_model = "gemini-3.1-flash-lite-preview"
+        self.default_model = "gemini-3.1-flash-lite"
         
         # ✅ 允许的模型白名单
         self.allowed_models = {
+            "gemini-3.1-flash-lite",
             "gemini-3-flash-preview",        # 快速模型
             "gemini-3.1-pro-preview",        # 高级推理模型（用于复杂任务）
         }
