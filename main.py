@@ -120,62 +120,79 @@ def check_rate_limit(ip: str):
     
     return True, ""
 
-# --- 异步 LLM 客户端 ---
+# --- 异步 LLM 客户端（OpenRouter 临时顶替版）---
 class AsyncLLMClient:
-    """异步 LLM 客户端 - Google Gemini 官方 API"""
-    
+    """异步 LLM 客户端 - OpenRouter（暂时顶替 Gemini 直连，绕开 Cap）"""
+
     def __init__(self):
         load_dotenv()
-        self.api_key = os.environ.get('GOOGLE_GEMINI_API_KEY')
-        self.default_model = "gemini-3.1-flash-lite"
-        
-        # ✅ 允许的模型白名单
+        # ✅ 改用 OpenRouter Key（记得在 Render 里加环境变量 OPENROUTER_API_KEY）
+        self.api_key = os.environ.get('OPENROUTER_API_KEY')
+        # ✅ OpenRouter 的模型 slug 带 provider 前缀
+        self.default_model = "google/gemini-3.1-flash-lite"
+
+        # ✅ 允许的模型白名单（OpenRouter slug）
         self.allowed_models = {
-            "gemini-3.1-flash-lite",
-            "gemini-3-flash-preview",        # 快速模型
-            "gemini-3.1-pro-preview",        # 高级推理模型（用于复杂任务）
+            "google/gemini-3.1-flash-lite",   # 和你原来用的等价，便宜、高并发
+            "google/gemini-3-flash-preview",  # 强一点
+            "google/gemini-3.5-flash",        # 更新的 flash
+            # 想做跨厂商热备可加（撞墙时切别家）：
+            # "deepseek/deepseek-chat",
+            # "anthropic/claude-3.5-haiku",
         }
-    
+
     def get_model(self, requested_model: Optional[str]) -> str:
         """验证并返回要使用的模型"""
         if requested_model and requested_model in self.allowed_models:
             return requested_model
         return self.default_model
-    
+
     async def call_llm(self, prompt_text: str, model: Optional[str] = None) -> str:
-        """异步调用 Google Gemini API"""
+        """异步调用 OpenRouter（OpenAI 兼容格式）"""
         if not self.api_key:
-            print("❌ 错误：未找到 GOOGLE_GEMINI_API_KEY 环境变量")
+            print("❌ 错误：未找到 OPENROUTER_API_KEY 环境变量")
             return "服务器配置错误，请联系管理员"
-        
+
         use_model = self.get_model(model)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{use_model}:generateContent?key={self.api_key}"
-        
+        url = "https://openrouter.ai/api/v1/chat/completions"
+
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 response = await client.post(
                     url,
-                    headers={"Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        # 下面两个可选，仅用于 OpenRouter 流量归因，可改成你自己的站
+                        "HTTP-Referer": "https://theqiflow.com",
+                        "X-Title": "Bazi Calculator",
+                    },
                     json={
-                        "contents": [{"parts": [{"text": prompt_text}]}],
-                        "generationConfig": {
-                            "temperature": 0.7,
-                            "maxOutputTokens": 8000
-                        }
+                        "model": use_model,
+                        "messages": [{"role": "user", "content": prompt_text}],
+                        "temperature": 0.7,
+                        "max_tokens": 16000,   # 你报告要 4500-6000 字，原来的 8000 容易被截断
                     }
                 )
                 response.raise_for_status()
                 result = response.json()
-                return result["candidates"][0]["content"]["parts"][0]["text"]
-        
+
+                # OpenAI 兼容响应解析
+                if result.get("choices"):
+                    return result["choices"][0]["message"]["content"]
+
+                # OpenRouter 偶尔在 200 的 body 里塞 error
+                print(f"⚠️ OpenRouter 返回异常结构: {json.dumps(result)[:500]}")
+                return "AI 服务暂时不可用，请稍后重试"
+
         except httpx.TimeoutException:
             print("⏱️ 错误：API 请求超时")
             return "请求超时，请稍后重试"
-        
+
         except httpx.HTTPStatusError as e:
             print(f"🚫 HTTP 错误：{e.response.status_code} - {e.response.text}")
             return "AI 服务暂时不可用，请稍后重试"
-        
+
         except Exception as e:
             print(f"❌ 未知错误：{e}")
             return "服务出现问题，请稍后重试"
