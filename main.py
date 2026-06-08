@@ -14,8 +14,8 @@ from typing import Optional
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
-# ✅ 导入数据库模块
-from database import init_database, save_conversation, get_recent_conversations, get_stats, search_conversations
+# ✅ 导入数据库模块（新增 get_db, cleanup）
+from database import init_database, save_conversation, get_recent_conversations, get_stats, search_conversations, get_db, cleanup
 
 # --- Lifespan 管理（替代弃用的 on_event）---
 @asynccontextmanager
@@ -36,20 +36,20 @@ app = FastAPI(title="Central AI Service", lifespan=lifespan)
 class CustomCORSMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         origin = request.headers.get("origin", "")
-        
+
         # 检查环境
         is_production = os.environ.get("ENVIRONMENT") == "production"
-        
+
         # 检查是否是允许的域名
         allowed = (
-            origin.endswith(".myshopify.com") or 
+            origin.endswith(".myshopify.com") or
             origin == "https://admin.shopify.com" or
             origin == "https://theqiflow.com" or
             origin == "https://fengshuisource.com" or
-            origin == "https://bazi-master.com" or    
+            origin == "https://bazi-master.com" or
             (not is_production and origin.startswith("http://localhost"))
         )
-        
+
         # 处理预检请求（OPTIONS）
         if request.method == "OPTIONS":
             if allowed:
@@ -63,14 +63,14 @@ class CustomCORSMiddleware(BaseHTTPMiddleware):
                     }
                 )
             return Response(status_code=403)
-        
+
         # 处理正常请求
         response = await call_next(request)
-        
+
         if allowed:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
-        
+
         return response
 
 app.add_middleware(CustomCORSMiddleware)
@@ -95,29 +95,29 @@ def get_client_ip(request: Request) -> str:
 def check_rate_limit(ip: str):
     """检查速率限制，返回: (是否允许请求, 错误信息)"""
     now = time.time()
-    
+
     # 检查每分钟限制
     minute_data = minute_requests[ip]
     if now - minute_data["reset_time"] > 60:
         minute_data["count"] = 0
         minute_data["reset_time"] = now
-    
+
     if minute_data["count"] >= MINUTE_LIMIT:
         return False, f"每分钟最多 {MINUTE_LIMIT} 次请求，请稍后再试"
-    
+
     # 检查每日限制
     daily_data = daily_requests[ip]
     if now - daily_data["reset_time"] > 86400:
         daily_data["count"] = 0
         daily_data["reset_time"] = now
-    
+
     if daily_data["count"] >= DAILY_LIMIT:
         return False, f"每天最多 {DAILY_LIMIT} 次请求，请明天再试"
-    
+
     # 通过检查，增加计数
     minute_data["count"] += 1
     daily_data["count"] += 1
-    
+
     return True, ""
 
 # --- 异步 LLM 客户端 ---
@@ -157,7 +157,7 @@ class AsyncLLMClient:
                         "contents": [{"parts": [{"text": prompt_text}]}],
                         "generationConfig": {
                             "temperature": 0.7,
-                            "maxOutputTokens": 16000   # ← 顺手保留之前的提升，原来是 8000，容易截断
+                            "maxOutputTokens": 16000
                         }
                     }
                 )
@@ -176,6 +176,7 @@ class AsyncLLMClient:
         except Exception as e:
             print(f"❌ 未知错误：{e}")
             return "服务出现问题，请稍后重试"
+
 # 初始化异步 LLM 客户端
 llm_client = AsyncLLMClient()
 
@@ -191,7 +192,7 @@ def read_root():
     return {
         "message": "AI Service 运行中",
         "status": "ok",
-        "version": "2.2",
+        "version": "2.3",
         "default_model": llm_client.default_model,
         "available_models": list(llm_client.allowed_models)
     }
@@ -200,31 +201,31 @@ def read_root():
 async def ask_ai_endpoint(request: AIRequest, req: Request):
     """
     AI 问答端点（异步版本）
-    
+
     参数：
     - prompt: 问题内容
     - model: 可选，指定模型 (如 "gemini-3.1-pro-preview")
     """
     # 获取客户端 IP
     client_ip = get_client_ip(req)
-    
+
     # 检查速率限制
     allowed, error_msg = check_rate_limit(client_ip)
     if not allowed:
         raise HTTPException(status_code=429, detail=error_msg)
-    
+
     # 确定使用的模型
     use_model = llm_client.get_model(request.model)
-    
+
     # 记录开始时间
     start_time = time.time()
-    
+
     # ✅ 异步调用 AI
     ai_response = await llm_client.call_llm(request.prompt, use_model)
-    
+
     # 计算响应时间
     response_time = time.time() - start_time
-    
+
     # 保存到数据库（容错处理）
     try:
         save_conversation(
@@ -236,10 +237,10 @@ async def ask_ai_endpoint(request: AIRequest, req: Request):
         )
     except Exception as e:
         print(f"⚠️ 保存对话失败: {e}")
-    
+
     # 打印使用情况日志
     print(f"[{client_ip}] 模型: {use_model} | 耗时: {response_time:.2f}s | 分钟: {minute_requests[client_ip]['count']}/{MINUTE_LIMIT}")
-    
+
     return {"response": ai_response, "model": use_model}
 
 @app.get("/api/health")
@@ -257,11 +258,11 @@ async def get_google_access_token() -> Optional[str]:
     client_id = os.environ.get("GOOGLE_ADS_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_ADS_CLIENT_SECRET")
     refresh_token = os.environ.get("GOOGLE_ADS_REFRESH_TOKEN")
-    
+
     if not all([client_id, client_secret, refresh_token]):
         print("❌ Google Ads OAuth 凭证缺失")
         return None
-    
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -283,7 +284,7 @@ async def get_google_access_token() -> Optional[str]:
 async def upload_offline_conversion(gclid: str, sale_id: str, amount: float, sale_time: str):
     """
     上传离线转化到 Google Ads API
-    
+
     参数:
     - gclid: Google Click ID
     - sale_id: Gumroad 订单 ID（用作 transaction_id 去重）
@@ -293,18 +294,18 @@ async def upload_offline_conversion(gclid: str, sale_id: str, amount: float, sal
     customer_id = os.environ.get("GOOGLE_ADS_CUSTOMER_ID")          # 10位数字，无横线
     developer_token = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN")
     conversion_action_id = os.environ.get("GOOGLE_ADS_CONVERSION_ACTION_ID")  # 转化操作 ID
-    
+
     if not all([customer_id, developer_token, conversion_action_id]):
         print("❌ Google Ads 配置缺失，跳过离线转化上传")
         print(f"   customer_id: {'✅' if customer_id else '❌'}")
         print(f"   developer_token: {'✅' if developer_token else '❌'}")
         print(f"   conversion_action_id: {'✅' if conversion_action_id else '❌'}")
         return False
-    
+
     access_token = await get_google_access_token()
     if not access_token:
         return False
-    
+
     # 构建转化数据
     conversion_payload = {
         "conversions": [
@@ -322,25 +323,25 @@ async def upload_offline_conversion(gclid: str, sale_id: str, amount: float, sal
         ],
         "partialFailure": True
     }
-    
+
     api_url = f"https://googleads.googleapis.com/v19/customers/{customer_id}:uploadClickConversions"
-    
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "developer-token": developer_token,
         "Content-Type": "application/json"
     }
-    
+
     # 如果使用 MCC（经理账户），需要加 login-customer-id
     login_customer_id = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
     if login_customer_id:
         headers["login-customer-id"] = login_customer_id
-    
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(api_url, headers=headers, json=conversion_payload)
             result = resp.json()
-            
+
             if resp.status_code == 200:
                 # 检查 partial failure
                 if result.get("partialFailureError"):
@@ -352,7 +353,7 @@ async def upload_offline_conversion(gclid: str, sale_id: str, amount: float, sal
             else:
                 print(f"❌ Google Ads API 错误 {resp.status_code}: {json.dumps(result, indent=2)}")
                 return False
-                
+
     except Exception as e:
         print(f"❌ Google Ads API 调用异常: {e}")
         return False
@@ -362,10 +363,10 @@ async def upload_offline_conversion(gclid: str, sale_id: str, amount: float, sal
 async def gumroad_webhook(request: Request):
     """
     Gumroad Ping Webhook 端点
-    
+
     Gumroad 购买成功后会 POST 到这里（x-www-form-urlencoded 格式）
     包含: email, sale_id, product_id, price, url_params 等
-    
+
     流程:
     1. 解析 Gumroad POST 数据
     2. 从 url_params 或 custom_fields 提取 gclid
@@ -376,10 +377,10 @@ async def gumroad_webhook(request: Request):
         body = await request.body()
         body_text = body.decode("utf-8")
         form_data = dict(parse_qs(body_text, keep_blank_values=True))
-        
+
         # parse_qs 返回的值是列表，取第一个
         data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in form_data.items()}
-        
+
         # 提取关键字段
         sale_id = data.get("sale_id", "")
         email = data.get("email", "")
@@ -389,19 +390,19 @@ async def gumroad_webhook(request: Request):
         seller_id = data.get("seller_id", "")
         is_test = data.get("test", "false")
         url_params = data.get("url_params", "")   # Gumroad 会传递购买链接上的 URL 参数
-        
+
         # 价格转换（Gumroad 以分为单位）
         try:
             amount_cents = int(price)
             amount_usd = amount_cents / 100.0
         except (ValueError, TypeError):
             amount_usd = 36.0  # 默认值
-        
+
         # ════════════════════════════════════════
         # 提取 gclid（从多个可能的位置）
         # ════════════════════════════════════════
         gclid = None
-        
+
         # 方法1: 从 url_params 提取
         if url_params:
             try:
@@ -410,17 +411,17 @@ async def gumroad_webhook(request: Request):
                     gclid = parsed_params["gclid"][0]
             except Exception:
                 pass
-        
+
         # 方法2: 从 custom_fields 提取
         if not gclid:
             custom_fields_key = "custom_fields[gclid]"
             if custom_fields_key in data:
                 gclid = data[custom_fields_key]
-        
+
         # 方法3: 直接在顶层查找
         if not gclid and "gclid" in data:
             gclid = data["gclid"]
-        
+
         # ════════════════════════════════════════
         # 日志输出
         # ════════════════════════════════════════
@@ -437,7 +438,7 @@ async def gumroad_webhook(request: Request):
         print(f"  Is Test:      {is_test}")
         print(f"  Time:         {datetime.now(timezone.utc).isoformat()}")
         print("")
-        
+
         # 调试：打印所有收到的字段（帮助排查 gclid 位置）
         print("  📦 All fields received:")
         for key, value in sorted(data.items()):
@@ -446,7 +447,7 @@ async def gumroad_webhook(request: Request):
                 val_str = val_str[:100] + "..."
             print(f"     {key}: {val_str}")
         print("")
-        
+
         # ════════════════════════════════════════
         # 上传离线转化到 Google Ads
         # ════════════════════════════════════════
@@ -454,28 +455,28 @@ async def gumroad_webhook(request: Request):
             # 格式化时间（Google Ads 需要: "yyyy-mm-dd hh:mm:ss+|-hh:mm"）
             now_utc = datetime.now(timezone.utc)
             sale_time = now_utc.strftime("%Y-%m-%d %H:%M:%S+00:00")
-            
+
             success = await upload_offline_conversion(
                 gclid=gclid,
                 sale_id=sale_id,
                 amount=amount_usd,
                 sale_time=sale_time
             )
-            
+
             if success:
                 print(f"🎉 转化已上传: ${amount_usd:.2f} from {email}")
             else:
                 print(f"⚠️ 转化上传失败，但 webhook 已记录")
-        
+
         elif is_test == "true":
             print("🧪 测试 Ping，跳过 Google Ads 上传")
-        
+
         elif not gclid:
             print("ℹ️ 无 GCLID（非广告流量购买），跳过 Google Ads 上传")
-        
+
         # Gumroad 需要 200 响应，否则会重试
         return Response(status_code=200, content="OK")
-    
+
     except Exception as e:
         print(f"❌ Gumroad webhook 处理异常: {e}")
         import traceback
@@ -495,14 +496,14 @@ def webhook_test():
         os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN"),
         os.environ.get("GOOGLE_ADS_CONVERSION_ACTION_ID"),
     ])
-    
+
     return {
         "status": "webhook endpoint ready",
         "google_ads_configured": google_ads_configured,
         "missing_env_vars": [
             var for var in [
                 "GOOGLE_ADS_CLIENT_ID",
-                "GOOGLE_ADS_CLIENT_SECRET", 
+                "GOOGLE_ADS_CLIENT_SECRET",
                 "GOOGLE_ADS_REFRESH_TOKEN",
                 "GOOGLE_ADS_CUSTOMER_ID",
                 "GOOGLE_ADS_DEVELOPER_TOKEN",
@@ -515,25 +516,12 @@ def webhook_test():
 # ════════════════════════════════════════════════════════════════
 # ✅ KLAVIYO 服务端代理端点（绕开 /client/events 的 IP 反滥用拦截）
 # ════════════════════════════════════════════════════════════════
-# 背景：
-#   Klaviyo 的 /client/events 是给真实顾客浏览器调用的公开端点，
-#   带有 IP 级别的反滥用模型。管理员从同一台电脑连续推送多个客户的
-#   Bracelet Recommendation Email 事件时会被 Klaviyo 边缘层 403 掉。
-# 
-# 解决方案：
-#   在本服务器（Render 服务端，IP 固定且被识别为合法商家流量）中转，
-#   走 Klaviyo 服务端 API /api/events + Private API Key 鉴权，
-#   不会触发针对 /client/events 的反滥用模型。
-#
-# 前端只需把原来直接调 https://a.klaviyo.com/client/events/ 的请求
-# 改为调 https://central-ai-server.onrender.com/api/push-klaviyo
-# ════════════════════════════════════════════════════════════════
 
 @app.post("/api/push-klaviyo")
 async def push_klaviyo(request: Request):
     """
     Klaviyo 事件推送代理
-    
+
     前端 POST body:
     {
       "email": "customer@example.com",
@@ -547,31 +535,31 @@ async def push_klaviyo(request: Request):
     allowed, error_msg = check_rate_limit(client_ip)
     if not allowed:
         raise HTTPException(status_code=429, detail=error_msg)
-    
+
     # 2. 解析并校验 body
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
+
     email = (body.get("email") or "").strip()
     first_name = body.get("first_name") or ""
     metric_name = (body.get("metric_name") or "").strip()
     properties = body.get("properties") or {}
-    
+
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Invalid or missing email")
     if not metric_name:
         raise HTTPException(status_code=400, detail="Missing metric_name")
     if not isinstance(properties, dict):
         raise HTTPException(status_code=400, detail="properties must be an object")
-    
+
     # 3. 取 Klaviyo Private Key
     klaviyo_key = os.environ.get("KLAVIYO_PRIVATE_API_KEY")
     if not klaviyo_key:
         print("❌ KLAVIYO_PRIVATE_API_KEY 环境变量未配置")
         raise HTTPException(status_code=500, detail="Klaviyo not configured on server")
-    
+
     # 4. 构造 Klaviyo 服务端 API payload（注意是 /api/events，不是 /client/events）
     payload = {
         "data": {
@@ -596,7 +584,7 @@ async def push_klaviyo(request: Request):
             }
         }
     }
-    
+
     # 5. 调 Klaviyo 服务端 /api/events
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -610,11 +598,11 @@ async def push_klaviyo(request: Request):
                 },
                 json=payload
             )
-        
+
         if resp.status_code in (200, 201, 202):
             print(f"[{client_ip}] ✅ Klaviyo 推送成功 → {email} (metric: {metric_name})")
             return {"success": True, "klaviyo_status": resp.status_code}
-        
+
         # Klaviyo 返回错误，把详情透传给前端便于排查
         err_text = resp.text[:1000]
         print(f"[{client_ip}] ❌ Klaviyo {resp.status_code}: {err_text}")
@@ -622,7 +610,7 @@ async def push_klaviyo(request: Request):
             status_code=502,
             detail=f"Klaviyo {resp.status_code}: {err_text}"
         )
-    
+
     except httpx.TimeoutException:
         print(f"[{client_ip}] ⏱️ Klaviyo API 超时")
         raise HTTPException(status_code=504, detail="Klaviyo API timeout")
@@ -643,26 +631,29 @@ def klaviyo_test():
     }
 
 
-# --- 管理端点（暂不加认证）---
+# ════════════════════════════════════════════════════════════════
+# --- 管理端点 ---
+# ════════════════════════════════════════════════════════════════
+
 @app.get("/admin/stats")
 def get_usage_stats():
     """查看当前使用统计"""
     try:
         db_stats = get_stats()
-    except:
+    except Exception:
         db_stats = {"error": "数据库暂无数据"}
-    
+
     return {
         "database": db_stats,
         "rate_limits": {
             "minute_usage": {
-                ip: data["count"] 
-                for ip, data in minute_requests.items() 
+                ip: data["count"]
+                for ip, data in minute_requests.items()
                 if data["count"] > 0
             },
             "daily_usage": {
-                ip: data["count"] 
-                for ip, data in daily_requests.items() 
+                ip: data["count"]
+                for ip, data in daily_requests.items()
                 if data["count"] > 0
             }
         }
@@ -691,3 +682,53 @@ def search_conversations_endpoint(keyword: str = None, ip: str = None, limit: in
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+# ════════════════════════════════════════════════════════════════
+# ✅ 新增：失败率 / IP 用量 / 清理
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/admin/daily-failures")
+def daily_failures(days: int = 14):
+    """每天：真实用户数(reports) / 失败数 / 失败率"""
+    with get_db() as conn:
+        cur = conn.execute("""
+            SELECT substr(timestamp,1,10) AS day,
+                   COUNT(*) AS users,
+                   SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+            FROM conversations WHERE kind='report'
+            GROUP BY day ORDER BY day DESC LIMIT ?
+        """, (days,))
+        rows = cur.fetchall()
+    return {"daily": [
+        {"day": d, "users": u, "failed": f or 0,
+         "failure_rate": round((f or 0) / u * 100, 1) if u else 0.0}
+        for d, u, f in rows
+    ]}
+
+@app.get("/admin/ip-usage")
+def ip_usage(days: int = 7, min_calls: int = 1):
+    """每个 IP 每天：总调用 / 真实用户(reports) / 失败"""
+    with get_db() as conn:
+        cur = conn.execute("""
+            SELECT ip_address, substr(timestamp,1,10) AS day,
+                   COUNT(*) AS calls,
+                   SUM(CASE WHEN kind='report' THEN 1 ELSE 0 END) AS reports,
+                   SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+            FROM conversations
+            WHERE substr(timestamp,1,10) >= date('now', ?)
+            GROUP BY ip_address, day
+            HAVING calls >= ?
+            ORDER BY day DESC, calls DESC
+        """, (f'-{days} days', min_calls))
+        rows = cur.fetchall()
+    return {"rows": [
+        {"ip": ip, "day": d, "calls": c, "reports": r or 0, "failed": f or 0,
+         "failure_rate": round((f or 0) / c * 100, 1) if c else 0.0}
+        for ip, d, c, r, f in rows
+    ]}
+
+@app.get("/admin/cleanup")
+def admin_cleanup(days: int = 30):
+    """删除超过 N 天的记录并 VACUUM 回收磁盘空间"""
+    return cleanup(days=days, vacuum=True)
