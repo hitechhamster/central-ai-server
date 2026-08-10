@@ -1,5 +1,6 @@
 # main.py
 from fastapi import FastAPI, HTTPException, Request, Response, Form
+from email_check import check_email
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -549,6 +550,24 @@ async def push_klaviyo(request: Request):
 
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Invalid or missing email")
+
+    # 2.5 邮箱可投递性校验 —— 拦在进 Klaviyo 之前
+    #
+    # 免费计算器强制留邮箱,想跳过的人就乱敲。2026-08-10 实测约 18% 的新订阅是
+    # 无效地址(退信里 49% Invalid Address / 50% 硬退),每个都要先发出去一封才被发现,
+    # 持续消耗发信信誉。拦在这里,坏地址根本不进 Klaviyo,也就不会触发那条三封信的
+    # 「更新版Full Bazi Report Delivery」序列。
+    #
+    # ⚠️ 一律 fail-open:校验模块内部任何异常都放行。这个端点是漏斗顶端,
+    #    宁可漏几个假邮箱,也不能因为 DNS 抽风把真实线索挡在门外。
+    try:
+        _ok, _why = await check_email(email)
+    except Exception as _e:
+        _ok, _why = True, f'checker_error:{_e}'
+    if not _ok:
+        print(f"[{client_ip}] 🚫 邮箱未通过校验({_why}): {email}")
+        # 回 200 而不是 4xx:前端不该因为这个弹错误,用户该照常拿到他的免费结果。
+        return {"success": False, "skipped": True, "reason": _why}
     if not metric_name:
         raise HTTPException(status_code=400, detail="Missing metric_name")
     if not isinstance(properties, dict):
