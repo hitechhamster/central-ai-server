@@ -640,6 +640,83 @@ async def push_klaviyo(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/klaviyo-profile-props")
+async def klaviyo_profile_props(request: Request):
+    """
+    代理写 Klaviyo profile 属性(服务端通道)。
+
+    为什么存在:前端原本用 Klaviyo client API(/client/subscriptions)直写属性,
+    2026-07-30 前后 Klaviyo 的 Cloudflare WAF 开始 403 掉 >~2KB 的 payload ——
+    邮件序列(email_day1-4,6-10KB)从此全军覆没,flow 护栏把 Day2-5 全部跳过,
+    断了 11 天没人发现(前端只 console.warn)。服务端 API 不走那个 WAF,由这里代写。
+
+    ⚠️ 这是公开端点,必须收紧:
+      ① 属性名白名单 —— 只准写邮件序列和 bazi_ 前缀,不然就是任意改档案的口子
+      ② 尺寸上限 64KB ③ 复用 IP 限流 ④ 邮箱格式校验
+    """
+    client_ip = get_client_ip(request)
+    allowed, error_msg = check_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_msg)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    email = (body.get("email") or "").strip()
+    props = body.get("properties") or {}
+    if not email or "@" not in email or len(email) > 254:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if not isinstance(props, dict) or not props:
+        raise HTTPException(status_code=400, detail="properties must be a non-empty object")
+    if len(str(props)) > 65536:
+        raise HTTPException(status_code=413, detail="properties too large")
+
+    def _key_ok(k: str) -> bool:
+        if not isinstance(k, str) or len(k) > 64:
+            return False
+        if k.startswith("bazi_"):
+            return True
+        # email_day{1..9}_{subject|preview|body|hook}
+        import re as _re
+        return bool(_re.match(r"^email_day[1-9]_(subject|preview|body|hook)$", k))
+
+    bad = [k for k in props if not _key_ok(k)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"disallowed keys: {bad[:5]}")
+
+    klaviyo_key = os.environ.get("KLAVIYO_PRIVATE_API_KEY")
+    if not klaviyo_key:
+        raise HTTPException(status_code=500, detail="Klaviyo not configured")
+
+    payload = {
+        "data": {
+            "type": "profile",
+            "attributes": {"email": email, "properties": props}
+        }
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://a.klaviyo.com/api/profile-import/",
+                headers={
+                    "Authorization": f"Klaviyo-API-Key {klaviyo_key}",
+                    "revision": "2024-10-15",
+                    "Content-Type": "application/json",
+                    "accept": "application/vnd.api+json",
+                },
+                json=payload,
+            )
+        if resp.status_code in (200, 201, 202):
+            print(f"[{client_ip}] ✅ profile props 写入 → {email} ({len(props)} keys)")
+            return {"success": True}
+        print(f"[{client_ip}] ❌ profile-import {resp.status_code}: {resp.text[:300]}")
+        raise HTTPException(status_code=502, detail=f"Klaviyo {resp.status_code}")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Klaviyo timeout")
+
+
 @app.get("/api/klaviyo-test")
 def klaviyo_test():
     """检查 Klaviyo 配置是否就绪"""
